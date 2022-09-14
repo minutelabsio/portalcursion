@@ -1,0 +1,24 @@
+@use "@minutelabsio/colors/styles/variables.scss" as *;
+
+$--colors: (
+  "primary": (
+    "base": $ml-color-violet,
+  ),
+  "success": (
+    "base": $ml-status-dark-good,
+  ),
+  "warning": (
+    "base": $ml-status-dark-warn,
+  ),
+  "danger": (
+    "base": $ml-status-dark-bad,
+  ),
+  "error": (
+    "base": $ml-status-dark-bad,
+  ),
+  "info": (
+    "base": $ml-status-dark-info,
+  ),
+);
+
+@forward "element-plus/theme-chalk/src/dark/var.scss" with ($colors: $--colors);
