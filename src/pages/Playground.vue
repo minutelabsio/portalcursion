@@ -26,13 +26,32 @@ const canvasRef = ref(null)
 
 const view = createView([0, 100, 0, 100], (draw, state) => {
   draw.color(colors.all.light)
-  draw.text(`windings: ${state.windings.map(a => a.toString()).join(' => ')}`, [10, -80])
+  draw.text('hold alt/option to rotate', [0, -80])
+  // draw.text(`windings: ${state.windings.map(a => a.toString()).join(' => ')}`, [0, -80])
+  state.objects.sort((a, b) => a.isInside ? -1 : 1)
   for (const obj of state.objects){
     obj.draw(draw, state)
   }
   if (state.intersection?.xingPt){
     draw.color(colors.all.ivory)
     draw.circle(state.intersection?.xingPt, 1)
+
+    const n = Vector.create()
+    state.intersection.segments.forEach((s, i) => {
+      draw.color(colors.all.yellow)
+      n.copy(s[1]).subtract(s[0]).setNorm(1.5).rotateBy(90 * DEG)
+      draw.text(`${i}`, s[0].plus(n))
+      draw.text(`${i}`, s[1].plus(n))
+    })
+
+    draw.ctx.setLineDash([10, 10])
+    draw.color(colors.all.yellow).style({}).path(
+      state.intersection.innerSegment,
+      false,
+      false,
+      2
+    )
+    draw.ctx.setLineDash([])
   }
 })
 
@@ -70,6 +89,11 @@ const displacementToLine = (line, p) => {
   return t.subtract(p)
 }
 
+const isNearly = (a, b, epsilon = 1e-8) => {
+  const s = Math.abs(a + b)
+  return (Math.abs(a - b) / s) < epsilon
+}
+
 const lineIntersection = (line1, line2) => {
   // https://stackoverflow.com/questions/29854085/line-segments-intersectionintersection-point
   const x1 = line1[0].x
@@ -86,23 +110,23 @@ const lineIntersection = (line1, line2) => {
     return null
   }
   const xi = ((x3 - x4) * (x1 * y2 - y1 * x2) - (x1 - x2) * (x3 * y4 - y3 * x4)) / d
-  if (x1 !== x2){
+  if (!isNearly(x1, x2)){
     if (xi < Math.min(x1, x2) || xi > Math.max(x1, x2)) {
       return null
     }
   }
-  if (x3 !== x4){
+  if (!isNearly(x3, x4)){
     if (xi < Math.min(x3, x4) || xi > Math.max(x3, x4)) {
       return null
     }
   }
   const yi = ((y3 - y4) * (x1 * y2 - y1 * x2) - (y1 - y2) * (x3 * y4 - y3 * x4)) / d
-  if (y1 !== y2){
+  if (!isNearly(y1, y2)){
     if (yi < Math.min(y1, y2) || yi > Math.max(y1, y2)) {
       return null
     }
   }
-  if (y3 !== y4){
+  if (!isNearly(y3, y4)){
     if (yi < Math.min(y3, y4) || yi > Math.max(y3, y4)) {
       return null
     }
@@ -111,8 +135,8 @@ const lineIntersection = (line1, line2) => {
 }
 
 const transport = (entrance, exit, pt) => {
-  const line = entrance.line
-  const line2 = exit.line
+  const line = entrance
+  const line2 = exit
   const a = line[1].minus(line[0])
   const b = line2[1].minus(line2[0])
   pt.subtract(line[0]).rotateBy(b.angle() - a.angle())
@@ -123,46 +147,124 @@ const applyPortalTransform = (winding, pt, portal) => {
   const [idx, dir] = winding
   const entrance = portal[idx]
   const exit = portal[idx ^ 1]
-  transport(entrance, exit, pt)
+  transport(entrance.line, exit.line, pt)
 }
 
-const getPortalSegments = (entrance, exit, segment, insideEnd, its = 100) => {
-  const xingPt = lineIntersection(entrance.line, segment)
-  if (its < 0){
-    console.log('Ran out of iterations in portal segmentation')
-    return [segment]
-  }
+const midpoint = (line) => line[1].plus(line[0]).multiply(0.5)
+
+const splitLine = (line, pt) => [
+  [line[0].clone(), pt.clone()],
+  [pt.clone(), line[1].clone()]
+]
+
+const lineDirection = (line) => line[1].minus(line[0])
+
+const getChirality = (division, pt) => {
+  const c = pt.minus(division[0]).cross(lineDirection(division))
+  return c > 0 ? 1 : c < 0 ? -1 : 0
+}
+
+const splitSegment = (division, segment, chirality) => {
+  const xingPt = lineIntersection(division, segment)
   if (!xingPt){
-    return [segment]
-  }
-  if (xingPt.equals(segment[0]) || xingPt.equals(segment[1])){
-    return [segment]
-  }
-  const outside = segment.slice(0)
-  outside.splice(insideEnd, 1, xingPt)
-  const inside = segment.map(v => v.clone())
-  inside.splice(insideEnd ^ 1, 1, xingPt.clone())
-  const next = inside.map(v => v.clone())
-  let din, dout
-  let touchesOuter
-  do {
-    if (its < 0){
-      console.log('Ran out of iterations in portal segmentation')
-      return [outside, next]
+    const ca = getChirality(division, segment[0])
+    const cb = getChirality(division, segment[1])
+    if (ca === chirality && cb === chirality){
+      return {
+        inside: segment,
+        outside: null,
+        xingPt: null
+      }
+    } else {
+      return {
+        inside: null,
+        outside: segment,
+        xingPt: null
+      }
     }
-    const p1 = next[0]
-    const p2 = next[1]
-    inside[0].copy(p1)
-    inside[1].copy(p2)
-    transport(entrance, exit, p1)
-    transport(entrance, exit, p2)
-    din = displacementToLine(inside, next[insideEnd ^ 1]).norm()
-    dout = displacementToLine(outside, next[insideEnd ^ 1]).norm()
-    touchesOuter = lineIntersection(entrance.line, next)
-    its -= 1
-  } while (din < dout && !touchesOuter)
-  const additional = getPortalSegments(entrance, exit, next, insideEnd, its - 1)
-  return [outside, ...additional]
+  }
+  // const l1 = [xingPt.clone(), segment[0].clone()]
+  // const l2 = [xingPt.clone(), segment[1].clone()]
+  const [l1, l2] = splitLine(segment, xingPt)
+  const c1 = getChirality(division, midpoint(l1))
+  if (c1 === chirality){
+    return {
+      inside: l1,
+      outside: l2,
+      xingPt
+    }
+  } else {
+    return {
+      inside: l2,
+      outside: l1,
+      xingPt
+    }
+  }
+}
+
+const getPortalSegments = (entrance, exit, segment, chirality, its = 200) => {
+  if (its < 0){
+    // console.log('Ran out of iterations in portal segmentation')
+    const c = getChirality(entrance, midpoint(segment))
+    if (c === chirality){
+      // it's inside... so hide it
+      return []
+    }
+    return [segment]
+  }
+  const {
+    inside,
+    outside,
+    xingPt
+  } = splitSegment(entrance, segment, chirality)
+
+  if (!inside){
+    return [outside]
+  }
+
+  transport(entrance, exit, inside[0])
+  transport(entrance, exit, inside[1])
+
+  const others = getPortalSegments(entrance, exit, inside, chirality, its - 1)
+  if (outside){
+    return [outside, ...others]
+  } else {
+    return others
+  }
+
+  // const xingPt = lineIntersection(entrance.line, segment)
+
+  // if (!xingPt){
+  //   return [segment]
+  // }
+  // if (xingPt.equals(segment[0]) || xingPt.equals(segment[1])){
+  //   return [segment]
+  // }
+  // const outside = segment.slice(0)
+  // outside.splice(insideEnd, 1, xingPt)
+  // const inside = segment.map(v => v.clone())
+  // inside.splice(insideEnd ^ 1, 1, xingPt.clone())
+  // const next = inside.map(v => v.clone())
+  // let din, dout
+  // let touchesOuter
+  // do {
+  //   if (its < 0){
+  //     console.log('Ran out of iterations in portal segmentation')
+  //     return [outside, next]
+  //   }
+  //   const p1 = next[0]
+  //   const p2 = next[1]
+  //   inside[0].copy(p1)
+  //   inside[1].copy(p2)
+  //   transport(entrance, exit, p1)
+  //   transport(entrance, exit, p2)
+  //   din = displacementToLine(inside, next[insideEnd ^ 1]).norm()
+  //   dout = displacementToLine(outside, next[insideEnd ^ 1]).norm()
+  //   touchesOuter = lineIntersection(entrance.line, next)
+  //   its -= 1
+  // } while (din < dout && !touchesOuter)
+  // const additional = getPortalSegments(entrance, exit, next, chirality, its - 1)
+  // return [outside, ...additional]
 }
 
 const handlePortalIntersection = ([port1, port2]) => {
@@ -189,11 +291,19 @@ const handlePortalIntersection = ([port1, port2]) => {
     port1.isInside = !port2Inside
     port1.insideEnd = port1.isInside && (dl10 < dl11 ? 0 : 1)
   }
-  const [inner, outer] = port2.isInside ? [port2, port1] : [port1, port2]
+  const [exit, entrance] = port2.isInside ? [port2, port1] : [port1, port2]
+  const insideEnd = port2.isInside ? port2.insideEnd : port1.insideEnd
+  const chirality = getChirality(entrance.line, exit.line[exit.insideEnd])
+  const innerSegment = [exit.line[insideEnd], xingPt]
+  const segments = getPortalSegments(entrance.line, exit.line, exit.line, chirality)
+  // segments.reverse()
   return {
-    inner,
-    outer,
-    xingPt
+    exit,
+    entrance,
+    innerSegment,
+    xingPt,
+    chirality,
+    segments
   }
 }
 
@@ -201,16 +311,16 @@ const createPortalOpening = (pos, size, ang, polarity) => {
   const hitboxSize = 5
   const d = Vector.create(0, size / 2)
   const line = [pos.plus(d), pos.minus(d)]
-  const w = .2
+  const w = .3
   const n = Vector.create()
   const [color1, color2] = polarity === 'plus' ?
     [
-      colors.roygbv.blue,
-      colors.roygbv.red
+      colors.all.blue,
+      colors.all.red
     ] :
     [
-      colors.roygbv.red,
-      colors.roygbv.blue
+      colors.all.red,
+      colors.all.blue
     ]
 
   const drawPortalLine = (d, line) => {
@@ -218,9 +328,9 @@ const createPortalOpening = (pos, size, ang, polarity) => {
     d.color(color1)
     const ang = n.copy(p1).subtract(p2).angle()
     n.set(0, w).rotateBy(ang)
-    d.path([p1.plus(n), p2.plus(n)], false, false, 3)
+    d.path([p1.plus(n), p2.plus(n)], false, false, 4)
     d.color(color2)
-    d.path([p1.minus(n), p2.minus(n)], false, false, 3)
+    d.path([p1.minus(n), p2.minus(n)], false, false, 4)
   }
 
   return {
@@ -247,32 +357,10 @@ const createPortalOpening = (pos, size, ang, polarity) => {
       const line = this.line
 
       if (this.isInside){
-        // const outer = line.slice(0)
-        // outer.splice(this.insideEnd, 1, this.xingPt)
-        // drawPortalLine(d, outer)
-        // const inner = line.slice(0)
-        // inner.splice(this.insideEnd ^ 1, 1, this.xingPt)
-        // const p1 = inner[0].clone()
-        // const p2 = inner[1].clone()
-        // transport(state.intersection.outer, state.intersection.inner, p1)
-        // transport(state.intersection.outer, state.intersection.inner, p2)
-        // const transformed = [
-        //   p1, p2
-        // ]
-        // drawPortalLine(d, transformed)
-
-        const segments = getPortalSegments(
-          state.intersection.outer,
-          state.intersection.inner,
-          line,
-          this.insideEnd
-        )
-        segments.reverse()
-        segments.forEach(s => {
-          drawPortalLine(d, s)
-        })
-
-        d.color(colors.all.ivory).circle(line[this.insideEnd], 1)
+        const segs = state.intersection.segments
+        for (let i = segs.length - 1; i >= 0; i--){
+          drawPortalLine(d, segs[i])
+        }
       } else {
         drawPortalLine(d, line)
       }
@@ -281,8 +369,8 @@ const createPortalOpening = (pos, size, ang, polarity) => {
 }
 
 const portal = [
-  createPortalOpening(Vector.create(-30, 0), 50, 0, 'plus'),
-  createPortalOpening(Vector.create(30, 0), 50, -51, 'minus')
+  createPortalOpening(Vector.create(-30, 0), 100, 0, 'plus'),
+  createPortalOpening(Vector.create(30, 0), 100, -34, 'minus')
 ]
 
 const state = {
@@ -342,6 +430,7 @@ const getPointerPos = (e) => {
 let grab = null
 let grabStartPos = Vector.create()
 let dragStart = null
+let dragAngle = false
 
 const pointerDown = (e) => {
   const pos = getPointerPos(e)
@@ -354,12 +443,37 @@ const pointerDown = (e) => {
 
 const pointerMove = e => {
   if (!dragStart){ return }
-  const d = getPointerPos(e).subtract(dragStart)
+  const pos = getPointerPos(e)
   if (grab) {
     const oldPos = grab.pos.clone()
-    grab.pos.copy(d).add(grabStartPos)
+    if (e.altKey){
+      if (dragAngle === false){
+        dragStart = pos.clone()
+        grabStartPos.copy(grab.pos)
+        dragAngle = grab.ang * DEG
+      } else {
+        const da = pos.minus(grab.pos).angle() - dragStart.minus(grab.pos).angle() + dragAngle
+        grab.ang = da / DEG
+      }
+    } else {
+
+      if (dragAngle !== false) {
+        dragAngle = false
+        dragStart = pos.clone()
+        grabStartPos.copy(grab.pos)
+      }
+
+      const d = pos.subtract(dragStart)
+      grab.pos.copy(d).add(grabStartPos)
+    }
 
     if (grab.isPortal){
+      // console.log(
+      //   portal[0].line[0].toString(),
+      //   portal[0].line[1].toString(),
+      //   portal[1].line[0].toString(),
+      //   portal[1].line[1].toString(),
+      // )
       state.intersection = handlePortalIntersection(portal)
       return
     }
@@ -379,6 +493,7 @@ const pointerMove = e => {
 const pointerUp = (e) => {
   dragStart = null
   grab = null
+  dragAngle = false
   state.windings = []
 }
 
